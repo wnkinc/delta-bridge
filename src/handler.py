@@ -14,7 +14,10 @@ BUCKET = os.environ["BUCKET_NAME"]
 def main(event, context):
     try:
         # 1. Decode body and figure out content-type
-        body = base64.b64decode(event["body"])
+        body = (base64.b64decode(event["body"])
+            if event.get("isBase64Encoded", False)
+            else event["body"].encode())
+
         content_type = event["headers"].get("content-type") or event["headers"].get("Content-Type")
         if not content_type:
             raise ValueError("Missing Content-Type header")

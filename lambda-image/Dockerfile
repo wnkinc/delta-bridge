@@ -1,11 +1,14 @@
-FROM public.ecr.aws/lambda/python:3.9
+FROM public.ecr.aws/lambda/python:3.9-arm64
 
-# Install Python deps
+# Set working directory
+WORKDIR /var/task
+
+# Install dependencies
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy in your handler
+# Copy in handler code
 COPY handler.py .
 
-# Tell Lambda which function to invoke
+# Specify Lambda entrypoint
 CMD [ "handler.main" ]

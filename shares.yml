@@ -1,0 +1,9 @@
+# shares.yml
+shares:
+  - name: share # the top-level share name
+    schemas:
+      - name: default # the schema under the share
+        tables:
+          # you can list specific tables, or for testing one:
+          - name: mytable
+            url: "s3://<YOUR_BUCKET>/datasets/<TABLE_ID>"
