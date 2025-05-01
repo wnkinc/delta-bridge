@@ -1,2 +1,4 @@
 *.pyc
 venv/
+/src/ingest-layer/
+**/__pycache__/
