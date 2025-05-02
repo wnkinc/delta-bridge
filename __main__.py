@@ -1,56 +1,64 @@
+# __main__.py
 import pulumi
 import pulumi_aws as aws
 import pulumi_aws.apigatewayv2 as apigw
 import pulumi_awsx as awsx
 
-# 1) Create S3 bucket
+# ---------------------------------------------------------------------------
+# 1) S3 bucket that stores raw uploads + Delta tables
+# ---------------------------------------------------------------------------
 bucket = aws.s3.Bucket("datasets")
 
-# 2) IAM role for Lambda
-lambda_role = aws.iam.Role("lambda-role",
-    assume_role_policy="""{
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Principal": { "Service": "lambda.amazonaws.com" },
-          "Action": "sts:AssumeRole"
-        }
-      ]
-    }"""
-)
-
-aws.iam.RolePolicyAttachment("lambda-basic-exec",
-    role=lambda_role.name,
-    policy_arn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-)
-
-# 3) Grant S3 PutObject access
-aws.iam.RolePolicy("lambda-s3-policy",
-    role=lambda_role.id,
-    policy=bucket.arn.apply(lambda arn: aws.iam.get_policy_document(
+# ---------------------------------------------------------------------------
+# 2) IAM role for the Lambda container
+# ---------------------------------------------------------------------------
+lambda_role = aws.iam.Role(
+    "lambda-role",
+    assume_role_policy=aws.iam.get_policy_document(
         statements=[{
             "effect": "Allow",
-            "actions": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
-            "resources": [
-                f"{arn}",
-                f"{arn}/*"
-            ]
+            "principals": [{
+                "type": "Service",
+                "identifiers": ["lambda.amazonaws.com"],
+            }],
+            "actions": ["sts:AssumeRole"],
         }]
-    ).json)
+    ).json,
 )
 
-# 4) ECR repo
-repo = awsx.ecr.Repository("ingest-repo")
+aws.iam.RolePolicyAttachment(
+    "lambda-basic-exec",
+    role=lambda_role.name,
+    policy_arn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+)
 
-# 5) Build and push Docker image
-image = awsx.ecr.Image("ingest-image",
+# Lambda may PUT raw files and READ/WRITE its Delta table path
+aws.iam.RolePolicy(
+    "lambda-s3-policy",
+    role=lambda_role.id,
+    policy=bucket.arn.apply(
+        lambda arn: aws.iam.get_policy_document(
+            statements=[{
+                "effect": "Allow",
+                "actions": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
+                "resources": [arn, f"{arn}/*"],
+            }]
+        ).json
+    ),
+)
+
+# ---------------------------------------------------------------------------
+# 3) Build and publish the Lambda container image
+# ---------------------------------------------------------------------------
+repo   = awsx.ecr.Repository("ingest-repo")
+image  = awsx.ecr.Image(
+    "ingest-image",
     repository_url=repo.url,
-    context="lambda-image"
+    context="lambda-image",          # ← directory with Dockerfile + handler
 )
 
-# 6) Lambda function using image
-lambda_func = aws.lambda_.Function("ingest-fn",
+lambda_func = aws.lambda_.Function(
+    "ingest-fn",
     package_type="Image",
     image_uri=image.image_uri,
     role=lambda_role.arn,
@@ -58,98 +66,73 @@ lambda_func = aws.lambda_.Function("ingest-fn",
     timeout=20,
     memory_size=256,
     environment=aws.lambda_.FunctionEnvironmentArgs(
-        variables={
-            "BUCKET_NAME": bucket.bucket
-        }
-    )
+        variables={"BUCKET_NAME": bucket.bucket},
+    ),
 )
 
-# 7) Create HTTP API
-api = apigw.Api("ingest-api",
-    protocol_type="HTTP"
-)
+# ---------------------------------------------------------------------------
+# 4) API Gateway (HTTP API) with /presign and /process routes
+# ---------------------------------------------------------------------------
+api = apigw.Api("ingest-api", protocol_type="HTTP")
 
-integration = apigw.Integration("lambda-integration",
+integration = apigw.Integration(
+    "lambda-integration",
     api_id=api.id,
     integration_type="AWS_PROXY",
     integration_uri=lambda_func.invoke_arn,
     integration_method="POST",
-    payload_format_version="2.0"
+    payload_format_version="2.0",
 )
 
-# Register both /presign and /process routes
-apigw.Route("post-presign-route",
-    api_id=api.id,
-    route_key="POST /presign",
-    target=integration.id.apply(lambda iid: f"integrations/{iid}")
-)
+for route in ("/presign", "/process"):
+    apigw.Route(
+        f"post-{route.strip('/')}-route",
+        api_id=api.id,
+        route_key=f"POST {route}",
+        target=integration.id.apply(lambda iid: f"integrations/{iid}"),
+    )
 
-apigw.Route("post-process-route",
-    api_id=api.id,
-    route_key="POST /process",
-    target=integration.id.apply(lambda iid: f"integrations/{iid}")
-)
-
-# Deploy API
-apigw.Stage("api-stage",
+apigw.Stage(
+    "api-stage",
     api_id=api.id,
     name="$default",
-    auto_deploy=True
+    auto_deploy=True,
 )
 
-# 8) Permission for API Gateway to invoke Lambda
-aws.lambda_.Permission("api-lambda-permission",
+aws.lambda_.Permission(
+    "api-lambda-permission",
     action="lambda:InvokeFunction",
     function=lambda_func.name,
     principal="apigateway.amazonaws.com",
-    source_arn=api.execution_arn.apply(lambda arn: f"{arn}/*/*")
+    source_arn=api.execution_arn.apply(lambda arn: f"{arn}/*/*"),
 )
 
-# 9) Export outputs
-pulumi.export("bucket_name", bucket.id)
-pulumi.export("api_url", api.api_endpoint)
-
-# 10) Security group to allow SSH and HTTP
-ec2_sg = aws.ec2.SecurityGroup("delta-share-sg",
-    description="Allow SSH and HTTP for Delta Sharing",
+# ---------------------------------------------------------------------------
+# 5) Security group + EC2 instance (Delta‑Sharing server)
+# ---------------------------------------------------------------------------
+ec2_sg = aws.ec2.SecurityGroup(
+    "delta-share-sg",
+    description="Allow SSH (22) and Delta Sharing (8080)",
     ingress=[
         aws.ec2.SecurityGroupIngressArgs(
-            protocol="tcp",
-            from_port=22,
-            to_port=22,
-            cidr_blocks=["0.0.0.0/0"]
+            protocol="tcp", from_port=22,   to_port=22,   cidr_blocks=["0.0.0.0/0"]
         ),
         aws.ec2.SecurityGroupIngressArgs(
-            protocol="tcp",
-            from_port=8080,
-            to_port=8080,
-            cidr_blocks=["0.0.0.0/0"]
+            protocol="tcp", from_port=8080, to_port=8080, cidr_blocks=["0.0.0.0/0"]
         ),
     ],
-    egress=[
-        aws.ec2.SecurityGroupEgressArgs(
-            protocol="-1",
-            from_port=0,
-            to_port=0,
-            cidr_blocks=["0.0.0.0/0"]
-        )
-    ]
+    egress=[aws.ec2.SecurityGroupEgressArgs(
+        protocol="-1", from_port=0, to_port=0, cidr_blocks=["0.0.0.0/0"]
+    )],
 )
 
-# 11) Get latest Ubuntu 22.04 AMI
-ubuntu = aws.ec2.get_ami(most_recent=True,
+ubuntu_ami = aws.ec2.get_ami(
+    most_recent=True,
     owners=["099720109477"],  # Canonical
-    filters=[{
-        "name": "name",
-        "values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-    }]
+    filters=[{"name": "name", "values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]}],
 )
 
-# 12) EC2 Key Pair (expects an existing key in your AWS account)
-key_name = "viewer-frontend-key"  # Replace with your actual EC2 key pair name
-
-# --- EC2‑side IAM ----------------------------------------------------------
-
+# --- EC2 instance‑profile (S3 read only) -----------------------------------
 ec2_role = aws.iam.Role(
     "delta-share-ec2-role",
     assume_role_policy=aws.iam.get_policy_document(
@@ -164,46 +147,34 @@ ec2_role = aws.iam.Role(
     ).json,
 )
 
-# Allow read‑only access to the specific bucket
 aws.iam.RolePolicy(
     "delta-share-ec2-s3-read",
-    role=ec2_role.id,          # attach to the role above
+    role=ec2_role.id,
     policy=bucket.arn.apply(
         lambda arn: aws.iam.get_policy_document(
             statements=[
-                {
-                    "effect": "Allow",
-                    "actions": ["s3:ListBucket"],
-                    "resources": [arn],
-                },
-                {
-                    "effect": "Allow",
-                    "actions": ["s3:GetObject"],
-                    "resources": [f"{arn}/*"],
-                },
+                {"effect": "Allow", "actions": ["s3:ListBucket"], "resources": [arn]},
+                {"effect": "Allow", "actions": ["s3:GetObject"], "resources": [f"{arn}/*"]},
             ]
         ).json
     ),
 )
 
-# EC2 needs an *instance profile* wrapper around the role
-ec2_profile = aws.iam.InstanceProfile(
-    "delta-share-ec2-profile",
-    role=ec2_role.name,
-)
+ec2_profile = aws.iam.InstanceProfile("delta-share-ec2-profile", role=ec2_role.name)
 
-
-# 13) Launch EC2 instance
-ec2_instance = aws.ec2.Instance("delta-share-server",
+ec2_instance = aws.ec2.Instance(
+    "delta-share-server",
     instance_type="t3.micro",
+    ami=ubuntu_ami.id,
+    key_name="viewer-frontend-key",  # ← your existing EC2 key‑pair name
     vpc_security_group_ids=[ec2_sg.id],
-    ami=ubuntu.id,
-    key_name=key_name,
     iam_instance_profile=ec2_profile.name,
-    tags={
-        "Name": "DeltaSharingServer"
-    }
+    tags={"Name": "DeltaSharingServer"},
 )
 
+# ---------------------------------------------------------------------------
+# 6) Stack outputs
+# ---------------------------------------------------------------------------
+pulumi.export("api_url",          api.api_endpoint)
+pulumi.export("bucket_name",      bucket.id)
 pulumi.export("delta_instance_ip", ec2_instance.public_ip)
-

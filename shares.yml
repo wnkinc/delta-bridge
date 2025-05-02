@@ -1,9 +1,9 @@
-# shares.yml
+version: 1
 shares:
-  - name: share # the top-level share name
+  - name: my_share
     schemas:
-      - name: default # the schema under the share
+      - name: default
         tables:
-          # you can list specific tables, or for testing one:
-          - name: mytable
-            url: "s3://<YOUR_BUCKET>/datasets/<TABLE_ID>"
+          - name: my_table
+            # ← point at the root of your Delta table
+            location: "s3a://datasets-6118313/datasets/7c5841a893894b3bb04643ee8a50919f"
