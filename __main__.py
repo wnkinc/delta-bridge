@@ -108,3 +108,102 @@ aws.lambda_.Permission("api-lambda-permission",
 # 9) Export outputs
 pulumi.export("bucket_name", bucket.id)
 pulumi.export("api_url", api.api_endpoint)
+
+# 10) Security group to allow SSH and HTTP
+ec2_sg = aws.ec2.SecurityGroup("delta-share-sg",
+    description="Allow SSH and HTTP for Delta Sharing",
+    ingress=[
+        aws.ec2.SecurityGroupIngressArgs(
+            protocol="tcp",
+            from_port=22,
+            to_port=22,
+            cidr_blocks=["0.0.0.0/0"]
+        ),
+        aws.ec2.SecurityGroupIngressArgs(
+            protocol="tcp",
+            from_port=8080,
+            to_port=8080,
+            cidr_blocks=["0.0.0.0/0"]
+        ),
+    ],
+    egress=[
+        aws.ec2.SecurityGroupEgressArgs(
+            protocol="-1",
+            from_port=0,
+            to_port=0,
+            cidr_blocks=["0.0.0.0/0"]
+        )
+    ]
+)
+
+# 11) Get latest Ubuntu 22.04 AMI
+ubuntu = aws.ec2.get_ami(most_recent=True,
+    owners=["099720109477"],  # Canonical
+    filters=[{
+        "name": "name",
+        "values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+    }]
+)
+
+# 12) EC2 Key Pair (expects an existing key in your AWS account)
+key_name = "viewer-frontend-key"  # Replace with your actual EC2 key pair name
+
+# --- EC2‑side IAM ----------------------------------------------------------
+
+ec2_role = aws.iam.Role(
+    "delta-share-ec2-role",
+    assume_role_policy=aws.iam.get_policy_document(
+        statements=[{
+            "effect": "Allow",
+            "principals": [{
+                "type": "Service",
+                "identifiers": ["ec2.amazonaws.com"],
+            }],
+            "actions": ["sts:AssumeRole"],
+        }]
+    ).json,
+)
+
+# Allow read‑only access to the specific bucket
+aws.iam.RolePolicy(
+    "delta-share-ec2-s3-read",
+    role=ec2_role.id,          # attach to the role above
+    policy=bucket.arn.apply(
+        lambda arn: aws.iam.get_policy_document(
+            statements=[
+                {
+                    "effect": "Allow",
+                    "actions": ["s3:ListBucket"],
+                    "resources": [arn],
+                },
+                {
+                    "effect": "Allow",
+                    "actions": ["s3:GetObject"],
+                    "resources": [f"{arn}/*"],
+                },
+            ]
+        ).json
+    ),
+)
+
+# EC2 needs an *instance profile* wrapper around the role
+ec2_profile = aws.iam.InstanceProfile(
+    "delta-share-ec2-profile",
+    role=ec2_role.name,
+)
+
+
+# 13) Launch EC2 instance
+ec2_instance = aws.ec2.Instance("delta-share-server",
+    instance_type="t3.micro",
+    vpc_security_group_ids=[ec2_sg.id],
+    ami=ubuntu.id,
+    key_name=key_name,
+    iam_instance_profile=ec2_profile.name,
+    tags={
+        "Name": "DeltaSharingServer"
+    }
+)
+
+pulumi.export("delta_instance_ip", ec2_instance.public_ip)
+
