@@ -31,10 +31,10 @@ aws.iam.RolePolicy("lambda-s3-policy",
     policy=bucket.arn.apply(lambda arn: aws.iam.get_policy_document(
         statements=[{
             "effect": "Allow",
-            "actions": ["s3:PutObject"],
+            "actions": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
             "resources": [
-                f"{arn}/uploads/*",
-                f"{arn}/datasets/*",
+                f"{arn}",
+                f"{arn}/*"
             ]
         }]
     ).json)
@@ -54,8 +54,8 @@ lambda_func = aws.lambda_.Function("ingest-fn",
     package_type="Image",
     image_uri=image.image_uri,
     role=lambda_role.arn,
-    architectures=["arm64"],  # match your base image
-    timeout=10,  # increase timeout to prevent premature failure
+    architectures=["arm64"],
+    timeout=20,
     memory_size=256,
     environment=aws.lambda_.FunctionEnvironmentArgs(
         variables={
@@ -77,19 +77,25 @@ integration = apigw.Integration("lambda-integration",
     payload_format_version="2.0"
 )
 
-route = apigw.Route("post-datasets-route",
+# Register both /presign and /process routes
+apigw.Route("post-presign-route",
     api_id=api.id,
-     route_key="POST /presign", 
+    route_key="POST /presign",
     target=integration.id.apply(lambda iid: f"integrations/{iid}")
 )
 
-stage = apigw.Stage("api-stage",
+apigw.Route("post-process-route",
     api_id=api.id,
-    name="$default",
-    auto_deploy=True,
-    description="Force deploy for /datasets route"
+    route_key="POST /process",
+    target=integration.id.apply(lambda iid: f"integrations/{iid}")
 )
 
+# Deploy API
+apigw.Stage("api-stage",
+    api_id=api.id,
+    name="$default",
+    auto_deploy=True
+)
 
 # 8) Permission for API Gateway to invoke Lambda
 aws.lambda_.Permission("api-lambda-permission",
