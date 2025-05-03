@@ -1,4 +1,3 @@
-# __main__.py
 import pulumi
 import pulumi_aws as aws
 import pulumi_aws.apigatewayv2 as apigw
@@ -48,7 +47,45 @@ aws.iam.RolePolicy(
 )
 
 # ---------------------------------------------------------------------------
-# 3) Build and publish the Lambda container image
+# 3) DynamoDB table for user-based dataset tracking
+# ---------------------------------------------------------------------------
+ddb_table = aws.dynamodb.Table(
+    "dataset-tracking",
+    attributes=[
+        {"name": "userId", "type": "S"},
+        {"name": "fileKey", "type": "S"},
+    ],
+    hash_key="userId",
+    range_key="fileKey",
+    billing_mode="PAY_PER_REQUEST",
+)
+
+# ---------------------------------------------------------------------------
+# 4) Extend Lambda IAM permissions to write to DynamoDB
+# ---------------------------------------------------------------------------
+aws.iam.RolePolicy(
+    "lambda-ddb-policy",
+    role=lambda_role.id,
+    policy=ddb_table.arn.apply(
+        lambda arn: aws.iam.get_policy_document(
+            statements=[
+                {
+                    "effect": "Allow",
+                    "actions": [
+                        "dynamodb:PutItem",
+                        "dynamodb:UpdateItem",
+                        "dynamodb:GetItem",
+                        "dynamodb:Query"
+                    ],
+                    "resources": [arn]
+                }
+            ]
+        ).json
+    ),
+)
+
+# ---------------------------------------------------------------------------
+# 5) Build and publish the Lambda container image
 # ---------------------------------------------------------------------------
 repo   = awsx.ecr.Repository("ingest-repo")
 image  = awsx.ecr.Image(
@@ -66,12 +103,15 @@ lambda_func = aws.lambda_.Function(
     timeout=20,
     memory_size=256,
     environment=aws.lambda_.FunctionEnvironmentArgs(
-        variables={"BUCKET_NAME": bucket.bucket},
+        variables={
+            "BUCKET_NAME": bucket.bucket,
+            "DDB_TABLE_NAME": ddb_table.name,
+        },
     ),
 )
 
 # ---------------------------------------------------------------------------
-# 4) API Gateway (HTTP API) with /presign and /process routes
+# 6) API Gateway (HTTP API) with /presign and /process routes
 # ---------------------------------------------------------------------------
 api = apigw.Api("ingest-api", protocol_type="HTTP")
 
@@ -108,7 +148,7 @@ aws.lambda_.Permission(
 )
 
 # ---------------------------------------------------------------------------
-# 5) Security group + EC2 instance (Delta‑Sharing server)
+# 7) Security group + EC2 instance (Delta‑Sharing server)
 # ---------------------------------------------------------------------------
 ec2_sg = aws.ec2.SecurityGroup(
     "delta-share-sg",
@@ -128,11 +168,10 @@ ec2_sg = aws.ec2.SecurityGroup(
 
 ubuntu_ami = aws.ec2.get_ami(
     most_recent=True,
-    owners=["099720109477"],  # Canonical
+    owners=["099720109477"],
     filters=[{"name": "name", "values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]}],
 )
 
-# --- EC2 instance‑profile (S3 read only) -----------------------------------
 ec2_role = aws.iam.Role(
     "delta-share-ec2-role",
     assume_role_policy=aws.iam.get_policy_document(
@@ -166,15 +205,16 @@ ec2_instance = aws.ec2.Instance(
     "delta-share-server",
     instance_type="t3.micro",
     ami=ubuntu_ami.id,
-    key_name="viewer-frontend-key",  # ← your existing EC2 key‑pair name
+    key_name="viewer-frontend-key",
     vpc_security_group_ids=[ec2_sg.id],
     iam_instance_profile=ec2_profile.name,
     tags={"Name": "DeltaSharingServer"},
 )
 
 # ---------------------------------------------------------------------------
-# 6) Stack outputs
+# 8) Stack outputs
 # ---------------------------------------------------------------------------
-pulumi.export("api_url",          api.api_endpoint)
-pulumi.export("bucket_name",      bucket.id)
-pulumi.export("delta_instance_ip", ec2_instance.public_ip)
+pulumi.export("api_url",            api.api_endpoint)
+pulumi.export("bucket_name",        bucket.id)
+pulumi.export("ddb_table_name",     ddb_table.name)
+pulumi.export("delta_instance_ip",  ec2_instance.public_ip)
