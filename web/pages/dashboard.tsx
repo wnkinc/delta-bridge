@@ -1,7 +1,10 @@
+// pages/dashboard.tsx
+
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/router";
 import { auth } from "@/utils/firebase";
 import { onAuthStateChanged } from "firebase/auth";
+import { toUtf8Blob } from "@/utils/encoding";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -27,35 +30,45 @@ export default function DashboardPage() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
-    console.log("[file input] changed", file);
     setSelectedFile(file);
   };
 
   const handleUpload = async () => {
     if (!userId || !selectedFile) {
-      console.warn("[🚫 Upload blocked]", { authReady, userId, selectedFile });
+      setStatus("Please select a file and ensure you’re signed in.");
       return;
     }
-    console.log("[endpoint]", process.env.NEXT_PUBLIC_API_URL + "/presign");
 
-    setStatus("Requesting upload URL...");
-    const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/presign`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, filename: selectedFile.name }),
-    });
-    const data = await res.json();
-    console.log("[✅ Presigned URL response]", data);
+    setStatus("Requesting upload URL…");
+    const presignRes = await fetch(
+      `${process.env.NEXT_PUBLIC_API_URL}/presign`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, filename: selectedFile.name }),
+      }
+    );
+    const presignData = await presignRes.json();
+    const url = presignData.url as string;
+    if (!url) {
+      setStatus("Failed to obtain upload URL.");
+      return;
+    }
 
-    setStatus("Uploading file...");
-    const uploadRes = await fetch(data.upload_url, {
+    setStatus("Uploading file…");
+    // Normalize encoding to UTF-8
+    const safeBlob = await toUtf8Blob(selectedFile);
+    const uploadRes = await fetch(url, {
       method: "PUT",
       headers: { "Content-Type": "text/csv" },
-      body: selectedFile,
+      body: safeBlob,
     });
-    console.log("[✅ File uploaded]", uploadRes.status);
 
-    setStatus("Upload complete!");
+    if (uploadRes.ok) {
+      setStatus("Upload complete! Processing will start shortly.");
+    } else {
+      setStatus("Upload failed. Please try again.");
+    }
   };
 
   const mockDatasets = [
