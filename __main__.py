@@ -6,7 +6,16 @@ import pulumi_awsx as awsx
 # ---------------------------------------------------------------------------
 # 1) S3 bucket that stores raw uploads + Delta tables
 # ---------------------------------------------------------------------------
-bucket = aws.s3.Bucket("datasets")
+bucket = aws.s3.Bucket(
+    "datasets",
+    cors_rules=[aws.s3.BucketCorsRuleArgs(
+        allowed_methods=["PUT", "POST", "GET", "HEAD"],
+        allowed_origins=["http://localhost:3000"],  # or ["*"] for all
+        allowed_headers=["*"],
+        expose_headers=["ETag"],
+        max_age_seconds=3000,
+    )],
+)
 
 # ---------------------------------------------------------------------------
 # 2) IAM role for the Lambda container
@@ -113,7 +122,17 @@ lambda_func = aws.lambda_.Function(
 # ---------------------------------------------------------------------------
 # 6) API Gateway (HTTP API) with /presign and /process routes
 # ---------------------------------------------------------------------------
-api = apigw.Api("ingest-api", protocol_type="HTTP")
+api = apigw.Api(
+    "ingest-api",
+    protocol_type="HTTP",
+    cors_configuration=apigw.ApiCorsConfigurationArgs(
+        allow_origins=["http://localhost:3000"],
+        allow_methods=["POST", "OPTIONS"],
+        allow_headers=["*"],
+        allow_credentials=False,  # or True if needed
+    ),
+)
+
 
 integration = apigw.Integration(
     "lambda-integration",
