@@ -1,4 +1,33 @@
+import { useEffect, useState } from "react";
+import { useRouter } from "next/router";
+import { auth } from "@/utils/firebase";
+import { onAuthStateChanged } from "firebase/auth";
+
 export default function DashboardPage() {
+  const router = useRouter();
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (!user) {
+        router.push("/login");
+      } else {
+        setUserEmail(user.email);
+        setLoading(false);
+      }
+    });
+    return unsubscribe;
+  }, [router]);
+
+  if (loading) {
+    return (
+      <main className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
+        <p>Loading...</p>
+      </main>
+    );
+  }
+
   const mockDatasets = [
     {
       name: "Sales_Q1_2025.csv",
@@ -14,7 +43,10 @@ export default function DashboardPage() {
 
   return (
     <main className="min-h-screen bg-gray-900 text-white px-6 py-10">
-      <h1 className="text-3xl font-extrabold mb-6">Your Datasets</h1>
+      <div className="flex justify-between items-center mb-8">
+        <h1 className="text-3xl font-extrabold">Your Datasets</h1>
+        <p className="text-sm text-gray-300">Signed in as {userEmail}</p>
+      </div>
 
       <button className="mb-6 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded transition">
         Upload New Dataset
