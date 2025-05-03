@@ -237,3 +237,28 @@ pulumi.export("api_url",            api.api_endpoint)
 pulumi.export("bucket_name",        bucket.id)
 pulumi.export("ddb_table_name",     ddb_table.name)
 pulumi.export("delta_instance_ip",  ec2_instance.public_ip)
+
+# 9) S3 Gateway VPC Endpoint to eliminate cross-AZ S3 hops
+# ---------------------------------------------------------------------------
+# 9a) Lookup the VPC you’re using (default VPC, if you haven’t created your own)
+default_vpc = aws.ec2.get_vpc(default=True)
+
+# 9b) Find its “main” route table (this is what your default subnets use)
+main_route_table = aws.ec2.get_route_table(
+    filters=[
+        { "name": "vpc-id",          "values": [ default_vpc.id ] },
+        { "name": "association.main", "values": [ "true" ] },
+    ]
+)
+
+# 9c) Create the gateway endpoint without the lookup
+s3_endpoint = aws.ec2.VpcEndpoint(
+    "s3GatewayEndpoint",
+    vpc_id=default_vpc.id,
+    service_name=f"com.amazonaws.{aws.config.region}.s3",  # direct S3 endpoint name
+    route_table_ids=[ main_route_table.id ],
+    vpc_endpoint_type="Gateway",
+)
+
+# (Optional) export for reference
+pulumi.export("s3GatewayEndpointId", s3_endpoint.id)
