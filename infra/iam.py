@@ -52,6 +52,7 @@ def create_lambda_role(bucket, ddb_table):
                         "dynamodb:UpdateItem",
                         "dynamodb:GetItem",
                         "dynamodb:Query",
+                        "dynamodb:Scan"
                     ],
                     "resources": [arn],
                 }]

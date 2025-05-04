@@ -6,6 +6,12 @@ import { auth } from "@/utils/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { toUtf8Blob } from "@/utils/encoding";
 
+interface Dataset {
+  tableId: string;
+  filename: string;
+  status: string;
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -15,6 +21,10 @@ export default function DashboardPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [status, setStatus] = useState("");
 
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Auth listener
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (!user) {
@@ -27,6 +37,35 @@ export default function DashboardPage() {
     });
     return unsubscribe;
   }, [router]);
+
+  // Poll for datasets
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+
+    async function fetchDatasets() {
+      try {
+        const res = await fetch(
+          `${process.env.NEXT_PUBLIC_API_URL}/datasets?userId=${userId}`,
+          { credentials: "include" }
+        );
+        const json = await res.json();
+        if (!cancelled) {
+          setDatasets(json.datasets || []);
+          setLoading(false);
+        }
+      } catch {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    fetchDatasets();
+    const id = setInterval(fetchDatasets, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [userId]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] || null;
@@ -56,7 +95,6 @@ export default function DashboardPage() {
     }
 
     setStatus("Uploading file…");
-    // Normalize encoding to UTF-8
     const safeBlob = await toUtf8Blob(selectedFile);
     const uploadRes = await fetch(url, {
       method: "PUT",
@@ -66,18 +104,17 @@ export default function DashboardPage() {
 
     if (uploadRes.ok) {
       setStatus("Upload complete! Processing will start shortly.");
+      setSelectedFile(null);
+      // Immediately poll again to pick up new entry
+      setLoading(true);
     } else {
       setStatus("Upload failed. Please try again.");
     }
   };
 
-  const mockDatasets = [
-    { name: "Sales_Q1_2025.csv", status: "Converted", shared: true },
-    { name: "Website_Traffic_March.csv", status: "Uploaded", shared: false },
-  ];
-
   return (
     <main className="min-h-screen bg-gray-900 text-white px-6 py-10">
+      {/* Header */}
       <div className="flex justify-between items-center mb-8">
         <h1 className="text-3xl font-extrabold">Your Datasets</h1>
         <p className="text-sm text-gray-300">
@@ -109,34 +146,25 @@ export default function DashboardPage() {
         {status && <p className="text-sm text-gray-400">{status}</p>}
       </div>
 
-      {/* Dataset Cards */}
-      <div className="grid gap-6">
-        {mockDatasets.map((dataset, idx) => (
-          <div
-            key={idx}
-            className="bg-gray-800 p-4 rounded shadow flex justify-between items-center"
-          >
-            <div>
-              <h2 className="text-lg font-semibold">{dataset.name}</h2>
-              <p className="text-gray-400 text-sm">
-                Status: {dataset.status} •{" "}
-                {dataset.shared ? "Shared" : "Not Shared"}
-              </p>
+      {/* Dataset Cards or Loading */}
+      {loading ? (
+        <div className="text-center text-gray-400">Loading datasets…</div>
+      ) : (
+        <div className="grid gap-6">
+          {datasets.map((ds) => (
+            <div
+              key={ds.tableId}
+              className="bg-gray-800 p-4 rounded shadow flex justify-between items-center"
+            >
+              <div>
+                <h2 className="text-lg font-semibold">{ds.filename}</h2>
+                <p className="text-gray-400 text-sm">Status: {ds.status}</p>
+              </div>
+              {/* Share/Unshare buttons will go here */}
             </div>
-            <div className="space-x-2">
-              {dataset.shared ? (
-                <button className="bg-red-500 hover:bg-red-600 text-sm px-3 py-1 rounded">
-                  Unshare
-                </button>
-              ) : (
-                <button className="bg-green-600 hover:bg-green-700 text-sm px-3 py-1 rounded">
-                  Share
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </main>
   );
 }

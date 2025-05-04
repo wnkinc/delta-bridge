@@ -1,21 +1,21 @@
-import pulumi_aws.apigatewayv2 as apigw
+import pulumi
 import pulumi_aws as aws
+import pulumi_aws.apigatewayv2 as apigw
 
 
-def create_api(lambda_func):
-    # 6) API Gateway (HTTP API) with /presign and /process routes
+def create_api(lambda_func: aws.lambda_.Function) -> apigw.Api:
     api = apigw.Api(
         "ingest-api",
         protocol_type="HTTP",
         cors_configuration=apigw.ApiCorsConfigurationArgs(
             allow_origins=["http://localhost:3000"],
-            allow_methods=["POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
-            allow_credentials=False,
+            allow_credentials=True,
         ),
     )
 
-    # Integration of Lambda with HTTP API
+    # Lambda integration for all routes
     integration = apigw.Integration(
         "lambda-integration",
         api_id=api.id,
@@ -25,16 +25,16 @@ def create_api(lambda_func):
         payload_format_version="2.0",
     )
 
-    # Routes for /presign and /process
-    for route in ("/presign", "/process"):
+    # Routes
+    for method, route in [("POST", "/presign"), ("POST", "/process"), ("GET", "/datasets")]:
         apigw.Route(
-            f"post-{route.strip('/')}-route",
+            f"route-{method.lower()}-{route.strip('/')}",
             api_id=api.id,
-            route_key=f"POST {route}",
+            route_key=f"{method} {route}",
             target=integration.id.apply(lambda iid: f"integrations/{iid}"),
         )
 
-    # Default stage deployment
+    # Stage
     apigw.Stage(
         "api-stage",
         api_id=api.id,
@@ -42,7 +42,7 @@ def create_api(lambda_func):
         auto_deploy=True,
     )
 
-    # Permission for API Gateway to invoke Lambda
+    # Permission so API GW can invoke the Lambda
     aws.lambda_.Permission(
         "api-lambda-permission",
         action="lambda:InvokeFunction",
@@ -50,5 +50,8 @@ def create_api(lambda_func):
         principal="apigateway.amazonaws.com",
         source_arn=api.execution_arn.apply(lambda arn: f"{arn}/*/*"),
     )
+
+    # Export endpoint
+    pulumi.export("api_url", api.api_endpoint)
 
     return api
