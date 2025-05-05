@@ -3,25 +3,25 @@ import pulumi_awsx as awsx
 import os
 
 
-def create_lambda(lambda_role, bucket, ddb_table):
+def create_lambda(lambda_role, bucket, ddb_table, delta_instance_id):
     """
-    Build and publish the Lambda container image and grant S3 invoke permissions.
+    Build and publish the Lambda container image, inject DELTA_INSTANCE_ID,
+    and grant S3 invoke permissions.
     Returns:
       - repo: AWSX ECR repository
       - image: built image
       - lambda_func: Lambda Function resource
       - allow_s3_invoker: Lambda permission resource for S3 invocation
     """
-    # ECR repository and image
+    # 1) ECR repository and image
     repo = awsx.ecr.Repository("ingest-repo")
     image = awsx.ecr.Image(
         "ingest-image",
         repository_url=repo.url,
-        # point one level up into your project root, then into lambda-image
         context=os.path.join(os.path.dirname(__file__), "..", "lambda-image"),
     )
 
-    # Lambda function for ingesting / processing data
+    # 2) Lambda function for ingesting/processing data
     lambda_func = aws.lambda_.Function(
         "ingest-fn",
         package_type="Image",
@@ -34,11 +34,12 @@ def create_lambda(lambda_role, bucket, ddb_table):
             variables={
                 "BUCKET_NAME": bucket.bucket,
                 "DDB_TABLE_NAME": ddb_table.name,
+                "DELTA_INSTANCE_ID": delta_instance_id,
             },
         ),
     )
 
-    # Permission to allow S3 to invoke this Lambda
+    # 3) Permission to allow S3 to invoke this Lambda
     allow_s3_invoker = aws.lambda_.Permission(
         "allow-s3-invoke",
         action="lambda:InvokeFunction",
@@ -78,9 +79,10 @@ def create_ec2(ec2_profile):
         most_recent=True,
         owners=["099720109477"],
         filters=[
-            {"name": "name", "values": [
-                "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"
-            ]}
+            {
+                "name": "name",
+                "values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"],
+            }
         ],
     )
 

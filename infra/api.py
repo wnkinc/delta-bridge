@@ -25,8 +25,13 @@ def create_api(lambda_func: aws.lambda_.Function) -> apigw.Api:
         payload_format_version="2.0",
     )
 
-    # Routes
-    for method, route in [("POST", "/presign"), ("POST", "/process"), ("GET", "/datasets")]:
+    # Routes (including new POST /share)
+    for method, route in [
+        ("POST", "/presign"),
+        ("POST", "/process"),
+        ("POST", "/share"),  # ← added this line
+        ("GET", "/datasets"),
+    ]:
         apigw.Route(
             f"route-{method.lower()}-{route.strip('/')}",
             api_id=api.id,

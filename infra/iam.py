@@ -6,14 +6,18 @@ def create_lambda_role(bucket, ddb_table):
     lambda_role = aws.iam.Role(
         "lambda-role",
         assume_role_policy=aws.iam.get_policy_document(
-            statements=[{
-                "effect": "Allow",
-                "principals": [{
-                    "type": "Service",
-                    "identifiers": ["lambda.amazonaws.com"],
-                }],
-                "actions": ["sts:AssumeRole"],
-            }]
+            statements=[
+                {
+                    "effect": "Allow",
+                    "principals": [
+                        {
+                            "type": "Service",
+                            "identifiers": ["lambda.amazonaws.com"],
+                        }
+                    ],
+                    "actions": ["sts:AssumeRole"],
+                }
+            ]
         ).json,
     )
 
@@ -30,11 +34,13 @@ def create_lambda_role(bucket, ddb_table):
         role=lambda_role.id,
         policy=bucket.arn.apply(
             lambda arn: aws.iam.get_policy_document(
-                statements=[{
-                    "effect": "Allow",
-                    "actions": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
-                    "resources": [arn, f"{arn}/*"],
-                }]
+                statements=[
+                    {
+                        "effect": "Allow",
+                        "actions": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
+                        "resources": [arn, f"{arn}/*"],
+                    }
+                ]
             ).json
         ),
     )
@@ -45,19 +51,36 @@ def create_lambda_role(bucket, ddb_table):
         role=lambda_role.id,
         policy=ddb_table.arn.apply(
             lambda arn: aws.iam.get_policy_document(
-                statements=[{
-                    "effect": "Allow",
-                    "actions": [
-                        "dynamodb:PutItem",
-                        "dynamodb:UpdateItem",
-                        "dynamodb:GetItem",
-                        "dynamodb:Query",
-                        "dynamodb:Scan"
-                    ],
-                    "resources": [arn],
-                }]
+                statements=[
+                    {
+                        "effect": "Allow",
+                        "actions": [
+                            "dynamodb:PutItem",
+                            "dynamodb:UpdateItem",
+                            "dynamodb:GetItem",
+                            "dynamodb:Query",
+                            "dynamodb:Scan",
+                        ],
+                        "resources": [arn],
+                    }
+                ]
             ).json
         ),
+    )
+
+    # Allow Lambda to send SSM commands to EC2
+    aws.iam.RolePolicy(
+        "lambda-ssm-send-command",
+        role=lambda_role.id,
+        policy=aws.iam.get_policy_document(
+            statements=[
+                {
+                    "effect": "Allow",
+                    "actions": ["ssm:SendCommand"],
+                    "resources": ["*"],  # or scope to specific instance ARN if desired
+                }
+            ]
+        ).json,
     )
 
     return lambda_role
@@ -68,14 +91,15 @@ def create_ec2_role(bucket):
     ec2_role = aws.iam.Role(
         "delta-share-ec2-role",
         assume_role_policy=aws.iam.get_policy_document(
-            statements=[{
-                "effect": "Allow",
-                "principals": [{
-                    "type": "Service",
-                    "identifiers": ["ec2.amazonaws.com"],
-                }],
-                "actions": ["sts:AssumeRole"],
-            }]
+            statements=[
+                {
+                    "effect": "Allow",
+                    "principals": [
+                        {"type": "Service", "identifiers": ["ec2.amazonaws.com"]}
+                    ],
+                    "actions": ["sts:AssumeRole"],
+                }
+            ]
         ).json,
     )
 
@@ -86,11 +110,26 @@ def create_ec2_role(bucket):
         policy=bucket.arn.apply(
             lambda arn: aws.iam.get_policy_document(
                 statements=[
-                    {"effect": "Allow", "actions": ["s3:ListBucket"], "resources": [arn]},
-                    {"effect": "Allow", "actions": ["s3:GetObject"],   "resources": [f"{arn}/*"]},
+                    {
+                        "effect": "Allow",
+                        "actions": ["s3:ListBucket"],
+                        "resources": [arn],
+                    },
+                    {
+                        "effect": "Allow",
+                        "actions": ["s3:GetObject"],
+                        "resources": [f"{arn}/*"],
+                    },
                 ]
             ).json
         ),
+    )
+
+    # Add SSM Managed Policy so EC2 can be targeted by SSM
+    aws.iam.RolePolicyAttachment(
+        "delta-share-ec2-ssm",
+        role=ec2_role.name,
+        policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
     )
 
     # Instance profile for EC2
