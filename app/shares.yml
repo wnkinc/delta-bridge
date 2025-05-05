@@ -1,9 +1,0 @@
-version: 1
-shares:
-  - name: my_share
-    schemas:
-      - name: default
-        tables:
-          - name: my_table
-            # ← point at the root of your Delta table
-            location: "s3a://datasets-6118313/datasets/7c5841a893894b3bb04643ee8a50919f"
