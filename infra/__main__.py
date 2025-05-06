@@ -30,7 +30,8 @@ repo, image, lambda_func, allow_s3_invoker = create_lambda(
     lambda_role,
     bucket,
     ddb_table,
-    ec2_instance.id,  # ← New parameter here
+    ec2_instance.id,
+    ec2_instance.public_ip,
 )
 
 # ---------------------------------------------------------------------------
@@ -57,3 +58,6 @@ pulumi.export("ddb_table_name", ddb_table.name)
 pulumi.export("delta_instance_ip", ec2_instance.public_ip)
 pulumi.export("delta_instance_id", ec2_instance.id)
 pulumi.export("s3_gateway_endpoint_id", s3_endpoint.id)
+
+# export the SG id so we can inspect it
+pulumi.export("delta_sg_id", ec2_sg.id)

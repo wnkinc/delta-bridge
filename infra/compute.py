@@ -1,12 +1,14 @@
-import pulumi_aws as aws
-import pulumi_awsx as awsx
 import os
 
+import pulumi_aws as aws
+import pulumi_awsx as awsx
 
-def create_lambda(lambda_role, bucket, ddb_table, delta_instance_id):
+
+def create_lambda(lambda_role, bucket, ddb_table, delta_instance_id, delta_server_url):
     """
-    Build and publish the Lambda container image, inject DELTA_INSTANCE_ID,
-    and grant S3 invoke permissions.
+    Build and publish the Lambda container image, inject DELTA_INSTANCE_ID
+    and DELTA_SERVER_URL, and grant S3 invoke permissions.
+
     Returns:
       - repo: AWSX ECR repository
       - image: built image
@@ -35,7 +37,11 @@ def create_lambda(lambda_role, bucket, ddb_table, delta_instance_id):
                 "BUCKET_NAME": bucket.bucket,
                 "DDB_TABLE_NAME": ddb_table.name,
                 "DELTA_INSTANCE_ID": delta_instance_id,
-            },
+                # provide the Delta-Sharing server endpoint
+                "DELTA_SERVER_URL": delta_server_url.apply(
+                    lambda ip: f"http://{ip}:8080"
+                ),
+            }
         ),
     )
 

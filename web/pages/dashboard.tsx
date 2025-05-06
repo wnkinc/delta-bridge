@@ -5,11 +5,12 @@ import { useRouter } from "next/router";
 import { auth } from "@/utils/firebase";
 import { onAuthStateChanged } from "firebase/auth";
 import { toUtf8Blob } from "@/utils/encoding";
+import ShareActions from "@/components/ShareActions";
 
 interface Dataset {
   tableId: string;
   filename: string;
-  status: string;
+  status: string; // "pending" | "converted" | "shared"
 }
 
 export default function DashboardPage() {
@@ -105,8 +106,7 @@ export default function DashboardPage() {
     if (uploadRes.ok) {
       setStatus("Upload complete! Processing will start shortly.");
       setSelectedFile(null);
-      // Immediately poll again to pick up new entry
-      setLoading(true);
+      setLoading(true); // refresh list
     } else {
       setStatus("Upload failed. Please try again.");
     }
@@ -160,7 +160,17 @@ export default function DashboardPage() {
                 <h2 className="text-lg font-semibold">{ds.filename}</h2>
                 <p className="text-gray-400 text-sm">Status: {ds.status}</p>
               </div>
-              {/* Share/Unshare buttons will go here */}
+              <ShareActions
+                tableId={ds.tableId}
+                status={ds.status}
+                onStatusChange={(newStatus) =>
+                  setDatasets((prev) =>
+                    prev.map((d) =>
+                      d.tableId === ds.tableId ? { ...d, status: newStatus } : d
+                    )
+                  )
+                }
+              />
             </div>
           ))}
         </div>

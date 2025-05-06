@@ -11,6 +11,7 @@ BUCKET = os.environ["BUCKET_NAME"]
 DDB_TABLE = os.environ["DDB_TABLE_NAME"]
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost:3000")
 DELTA_INSTANCE_ID = os.environ["DELTA_INSTANCE_ID"]
+DELTA_SERVER_URL = os.environ["DELTA_SERVER_URL"]  # ← NEW
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
@@ -85,9 +86,6 @@ def process_s3_object(bucket: str, key: str):
 # Share via SSM: ensure share.yaml exists, append entry, restart service
 # ---------------------------------------------------------------------------
 def share_table(table_id: str):
-    """
-    Bootstraps share.yaml if needed, appends a new entry, and restarts the service.
-    """
     script = f"""
 mkdir -p /home/ubuntu/shares
 
@@ -181,16 +179,69 @@ def main(event, context):
         table_id = payload.get("tableId")
         if not table_id:
             return build_response(400, {"error": "Missing tableId"})
+
+        # Prevent re-sharing if already shared
+        existing = dynamodb.scan(
+            TableName=DDB_TABLE,
+            FilterExpression="tableId = :tid AND #s = :shared",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":tid": {"S": table_id},
+                ":shared": {"S": "shared"},
+            },
+        ).get("Items", [])
+        if existing:
+            return build_response(409, {"error": "Dataset already shared"})
+
+        # 1) Trigger SSM to update share.yaml
         try:
             cmd_id = share_table(table_id)
         except Exception as e:
             return build_response(500, {"error": str(e)})
+
+        # 2) Update DynamoDB status to 'shared'
+        scan_resp = dynamodb.scan(
+            TableName=DDB_TABLE,
+            FilterExpression="tableId = :tid",
+            ExpressionAttributeValues={":tid": {"S": table_id}},
+            ProjectionExpression="userId,fileKey",
+        )
+        items = scan_resp.get("Items", [])
+        if not items:
+            return build_response(404, {"error": "Dataset record not found"})
+        user_id = items[0]["userId"]["S"]
+        file_key = items[0]["fileKey"]["S"]
+
+        dynamodb.update_item(
+            TableName=DDB_TABLE,
+            Key={
+                "userId": {"S": user_id},
+                "fileKey": {"S": file_key},
+            },
+            UpdateExpression="SET #s = :new",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":new": {"S": "shared"}},
+        )
+
+        # 3) Build inline profile + snippet
+        profile = {
+            "shareCredentialsVersion": 1,
+            "endpoint": DELTA_SERVER_URL,  # ← INLINE PROFILE
+            "bearerToken": "",
+        }
         snippet = {
-            "profileFile": "share_creds.json",
             "tableUrl": f"share://my_share.default.{table_id}",
             "ssmCommandId": cmd_id,
         }
-        return build_response(200, {"snippet": snippet})
+
+        return build_response(
+            200,
+            {
+                "profile": profile,  # ← RETURN PROFILE INLINE
+                "snippet": snippet,
+                "status": "shared",
+            },
+        )
 
     # GET /datasets — list user’s uploads
     if method == "GET" and path == "/datasets":

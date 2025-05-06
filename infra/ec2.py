@@ -30,8 +30,8 @@ def create_ec2(ec2_profile):
             },
             {
                 "protocol": "tcp",
-                "from_port": 5959,
-                "to_port": 5959,
+                "from_port": 8080,
+                "to_port": 8080,
                 "cidr_blocks": ["0.0.0.0/0"],
             },
         ],
