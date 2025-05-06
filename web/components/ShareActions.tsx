@@ -25,9 +25,22 @@ const ShareActions: React.FC<ShareActionsProps> = ({
   onStatusChange,
 }) => {
   const [loading, setLoading] = useState(false);
-  const [shareData, setShareData] = useState<ShareResponse | null>(null);
+  const [snippetText, setSnippetText] = useState<string>("");
   const [showModal, setShowModal] = useState(false);
 
+  // helper to build the Python snippet from a fresh share-response
+  const buildSnippet = (profile: ShareResponse["profile"], tableUrl: string) =>
+    `import delta_sharing
+
+# inline credentials profile
+profile = ${JSON.stringify(profile, null, 2)}
+
+table_url = "${tableUrl}"
+
+df = delta_sharing.load_as_pandas(table_url, profile=profile)
+`;
+
+  // --- share: POST /share
   const doShare = async () => {
     setLoading(true);
     const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/share`, {
@@ -35,15 +48,18 @@ const ShareActions: React.FC<ShareActionsProps> = ({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tableId }),
     });
-    const data = await res.json();
+
+    const data: ShareResponse = await res.json();
     setLoading(false);
+
     if (res.ok) {
       onStatusChange("shared");
-      setShareData(data);
+      setSnippetText(buildSnippet(data.profile, data.snippet.tableUrl));
       setShowModal(true);
     }
   };
 
+  // --- unshare: POST /unshare
   const doUnshare = async () => {
     setLoading(true);
     const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/unshare`, {
@@ -52,24 +68,42 @@ const ShareActions: React.FC<ShareActionsProps> = ({
       body: JSON.stringify({ tableId }),
     });
     setLoading(false);
+
     if (res.ok) {
       onStatusChange("converted");
-      // optionally clear shareData here if you want
+      setSnippetText("");
+      setShowModal(false);
     }
   };
 
-  // Build code block using inline profile
-  const snippetText = shareData
-    ? `import delta_sharing
+  // --- view saved snippet: GET /snippet?tableId=...
+  const doViewSnippet = async () => {
+    setLoading(true);
 
-# inline credentials profile
-profile = ${JSON.stringify(shareData.profile, null, 2)}
+    const url = new URL(`${process.env.NEXT_PUBLIC_API_URL}/snippet`);
+    url.searchParams.set("tableId", tableId);
 
-table_url = "${shareData.snippet.tableUrl}"
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
 
-df = delta_sharing.load_as_pandas(table_url, profile=profile)
-`
-    : "";
+    const payload: { notebookSnippet?: string; error?: string } =
+      await res.json();
+
+    setLoading(false);
+
+    if (res.ok && payload.notebookSnippet) {
+      setSnippetText(payload.notebookSnippet);
+      setShowModal(true);
+    } else {
+      // optionally surface the error:
+      console.error("Failed to load snippet:", payload.error);
+      alert(
+        payload.error || "Could not fetch snippet. Check console for details."
+      );
+    }
+  };
 
   return (
     <>
@@ -82,6 +116,7 @@ df = delta_sharing.load_as_pandas(table_url, profile=profile)
           {loading ? "Sharing..." : "Share"}
         </button>
       )}
+
       {status === "shared" && (
         <>
           <button
@@ -91,24 +126,21 @@ df = delta_sharing.load_as_pandas(table_url, profile=profile)
           >
             {loading ? "Unsharing..." : "Unshare"}
           </button>
-          {/* New: let them pull up the snippet again */}
-          {shareData && !showModal && (
-            <button
-              onClick={() => setShowModal(true)}
-              className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700 ml-2"
-            >
-              View Snippet
-            </button>
-          )}
+
+          <button
+            disabled={loading}
+            onClick={doViewSnippet}
+            className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700 ml-2 disabled:opacity-50"
+          >
+            {loading ? "Loading snippet..." : "View Snippet"}
+          </button>
         </>
       )}
 
-      {showModal && shareData && (
+      {showModal && (
         <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4">
           <div className="bg-gray-800 p-6 rounded max-w-lg w-full">
-            <h3 className="text-xl font-semibold mb-4 text-white">
-              Share Snippet
-            </h3>
+            <h3 className="text-xl font-semibold mb-4 text-white">Snippet</h3>
             <textarea
               readOnly
               className="w-full h-40 p-2 bg-gray-900 text-green-200 rounded"
