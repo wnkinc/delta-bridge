@@ -11,7 +11,7 @@ BUCKET = os.environ["BUCKET_NAME"]
 DDB_TABLE = os.environ["DDB_TABLE_NAME"]
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost:3000")
 DELTA_INSTANCE_ID = os.environ["DELTA_INSTANCE_ID"]
-DELTA_SERVER_URL = os.environ["DELTA_SERVER_URL"]  # ← NEW
+DELTA_SERVER_URL = os.environ["DELTA_SERVER_URL"]
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
@@ -19,7 +19,7 @@ ssm = boto3.client("ssm")
 
 
 # ---------------------------------------------------------------------------
-# Helper: build standard HTTP responses
+# Helper: standard HTTP response
 # ---------------------------------------------------------------------------
 def build_response(status_code: int, body: dict):
     return {
@@ -34,18 +34,14 @@ def build_response(status_code: int, body: dict):
 
 
 # ---------------------------------------------------------------------------
-# Process S3 object to Delta and update status in DynamoDB
+# Convert CSV → Delta & mark 'converted'
 # ---------------------------------------------------------------------------
 def process_s3_object(bucket: str, key: str):
-    import pandas as pd  # lazy import
-    from deltalake.writer import write_deltalake  # lazy import
+    import pandas as pd
+    from deltalake.writer import write_deltalake
     import os
 
-    parts = key.split("/")
-    if len(parts) < 3:
-        raise ValueError(f"Unexpected S3 key format: {key}")
-    table_id = parts[1]
-
+    table_id = key.split("/")[1]
     local_csv = f"/tmp/{uuid.uuid4().hex}.csv"
     s3.download_file(bucket, key, local_csv)
 
@@ -53,95 +49,109 @@ def process_s3_object(bucket: str, key: str):
     delta_dir = f"/tmp/{uuid.uuid4().hex}"
     write_deltalake(delta_dir, df, mode="overwrite")
 
+    # upload back
     for root, _, files in os.walk(delta_dir):
         for fname in files:
-            full_path = os.path.join(root, fname)
-            rel_path = os.path.relpath(full_path, delta_dir)
-            out_key = f"datasets/{table_id}/delta/{rel_path}"
-            s3.upload_file(full_path, bucket, out_key)
+            full = os.path.join(root, fname)
+            rel = os.path.relpath(full, delta_dir)
+            out = f"datasets/{table_id}/delta/{rel}"
+            s3.upload_file(full, bucket, out)
 
-    # Update status in DynamoDB from 'pending' to 'converted'
-    scan_resp = dynamodb.scan(
+    # mark converted
+    resp = dynamodb.scan(
         TableName=DDB_TABLE,
         FilterExpression="fileKey = :fk",
         ExpressionAttributeValues={":fk": {"S": key}},
         ProjectionExpression="userId",
     )
-    items = scan_resp.get("Items", [])
-    if items:
-        user_id = items[0]["userId"]["S"]
+    for item in resp.get("Items", []):
         dynamodb.update_item(
             TableName=DDB_TABLE,
             Key={
-                "userId": {"S": user_id},
+                "userId": {"S": item["userId"]["S"]},
                 "fileKey": {"S": key},
             },
-            UpdateExpression="SET #s = :new",
+            UpdateExpression="SET #s = :c",
             ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":new": {"S": "converted"}},
+            ExpressionAttributeValues={":c": {"S": "converted"}},
         )
 
 
 # ---------------------------------------------------------------------------
-# Share via SSM: ensure share.yaml exists, append entry, restart service
+# Re-generate share.yaml with *all* shared tables
 # ---------------------------------------------------------------------------
-def share_table(table_id: str):
-    script = f"""
-mkdir -p /home/ubuntu/shares
+def share_table():
+    # 1) fetch all shared tableIds
+    resp = dynamodb.scan(
+        TableName=DDB_TABLE,
+        FilterExpression="#s = :sh",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={":sh": {"S": "shared"}},
+        ProjectionExpression="tableId",
+    )
+    table_ids = [i["tableId"]["S"] for i in resp.get("Items", [])]
 
-if [ ! -f /home/ubuntu/shares/share.yaml ]; then
-  echo "shareCredentialsVersion: 1" > /home/ubuntu/shares/share.yaml
-  echo "shares:"                  >> /home/ubuntu/shares/share.yaml
-fi
+    # 2) build YAML content
+    lines = [
+        "version: 1",
+        "",
+        "# server config",
+        'host: "0.0.0.0"',
+        "port: 8080",
+        'endpoint: "/"',
+        "",
+        "shares:",
+        "  - name: my_share",
+        "    schemas:",
+        "      - name: default",
+        "        tables:",
+    ]
+    for tid in table_ids:
+        lines.append(f"          - name: {tid}")
+        lines.append(f"            location: s3a://{BUCKET}/datasets/{tid}/delta")
+    yaml_body = "\n".join(lines)
 
-cat << 'EOF' >> /home/ubuntu/shares/share.yaml
-  - name: {table_id}
-    schema: default
-    location: s3a://{BUCKET}/datasets/{table_id}/delta
+    # 3) send to instance (overwrites file)
+    script = f"""cat << 'EOF' > /home/ubuntu/shares/share.yaml
+{yaml_body}
 EOF
 
 sudo systemctl restart delta-sharing
 """
-    resp = ssm.send_command(
+    cmd = ssm.send_command(
         InstanceIds=[DELTA_INSTANCE_ID],
         DocumentName="AWS-RunShellScript",
         Parameters={"commands": [script]},
     )
-    return resp["Command"]["CommandId"]
+    return cmd["Command"]["CommandId"]
 
 
 # ---------------------------------------------------------------------------
 # Lambda entrypoint
 # ---------------------------------------------------------------------------
 def main(event, context):
-    # 1) S3 Event trigger (auto conversion)
+    # 1) S3-triggered conversion
     if "Records" in event and event["Records"][0].get("eventSource") == "aws:s3":
-        for record in event["Records"]:
-            bucket_name = record["s3"]["bucket"]["name"]
-            object_key = record["s3"]["object"]["key"]
-            try:
-                process_s3_object(bucket_name, object_key)
-            except Exception as e:
-                print(f"❌ process_s3_object failed: {e}")
-                raise
+        for r in event["Records"]:
+            process_s3_object(r["s3"]["bucket"]["name"], r["s3"]["object"]["key"])
         return {"statusCode": 200}
 
-    # 2) HTTP API Gateway trigger
+    # 2) HTTP routes
     http = event.get("requestContext", {}).get("http", {})
-    method = http.get("method")
-    path = http.get("path")
+    method, path = http.get("method"), http.get("path")
 
     # POST /presign
     if method == "POST" and path == "/presign":
-        payload = json.loads(event.get("body", "{}") or "{}")
-        user_id = payload.get("userId")
-        filename = payload.get("filename")
+        body = json.loads(event.get("body", "{}") or "{}")
+        user_id = body.get("userId")
+        filename = body.get("filename")
         if not user_id or not filename:
             return build_response(400, {"error": "Missing userId or filename"})
 
         table_id = uuid.uuid4().hex
         s3_key = f"datasets/{table_id}/raw/{filename}"
 
+        # record pending
         dynamodb.put_item(
             TableName=DDB_TABLE,
             Item={
@@ -161,89 +171,138 @@ def main(event, context):
         )
         return build_response(200, {"url": url, "tableId": table_id, "s3Key": s3_key})
 
-    # POST /process (manual trigger)
+    # POST /process
     if method == "POST" and path == "/process":
-        payload = json.loads(event.get("body", "{}") or "{}")
-        s3_key = payload.get("s3Key") or payload.get("s3_key")
-        if not s3_key:
+        body = json.loads(event.get("body", "{}") or "{}")
+        key = body.get("s3Key") or body.get("s3_key")
+        if not key:
             return build_response(400, {"error": "Missing s3Key"})
-        try:
-            process_s3_object(BUCKET, s3_key)
-        except Exception as e:
-            return build_response(500, {"error": str(e)})
-        return build_response(200, {"message": "Delta table written", "s3Key": s3_key})
+        process_s3_object(BUCKET, key)
+        return build_response(200, {"message": "Delta table written", "s3Key": key})
 
-    # POST /share (new SSM-driven share)
+    # POST /share
     if method == "POST" and path == "/share":
-        payload = json.loads(event.get("body", "{}") or "{}")
-        table_id = payload.get("tableId")
+        body = json.loads(event.get("body", "{}") or "{}")
+        table_id = body.get("tableId")
         if not table_id:
             return build_response(400, {"error": "Missing tableId"})
 
-        # Prevent re-sharing if already shared
-        existing = dynamodb.scan(
+        # mark shared in DynamoDB
+        scan = dynamodb.scan(
             TableName=DDB_TABLE,
-            FilterExpression="tableId = :tid AND #s = :shared",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":tid": {"S": table_id},
-                ":shared": {"S": "shared"},
-            },
-        ).get("Items", [])
-        if existing:
-            return build_response(409, {"error": "Dataset already shared"})
-
-        # 1) Trigger SSM to update share.yaml
-        try:
-            cmd_id = share_table(table_id)
-        except Exception as e:
-            return build_response(500, {"error": str(e)})
-
-        # 2) Update DynamoDB status to 'shared'
-        scan_resp = dynamodb.scan(
-            TableName=DDB_TABLE,
-            FilterExpression="tableId = :tid",
-            ExpressionAttributeValues={":tid": {"S": table_id}},
+            FilterExpression="tableId = :t",
+            ExpressionAttributeValues={":t": {"S": table_id}},
             ProjectionExpression="userId,fileKey",
         )
-        items = scan_resp.get("Items", [])
+        items = scan.get("Items", [])
         if not items:
             return build_response(404, {"error": "Dataset record not found"})
-        user_id = items[0]["userId"]["S"]
-        file_key = items[0]["fileKey"]["S"]
+        user_id, file_key = items[0]["userId"]["S"], items[0]["fileKey"]["S"]
 
         dynamodb.update_item(
             TableName=DDB_TABLE,
-            Key={
-                "userId": {"S": user_id},
-                "fileKey": {"S": file_key},
-            },
-            UpdateExpression="SET #s = :new",
+            Key={"userId": {"S": user_id}, "fileKey": {"S": file_key}},
+            UpdateExpression="SET #s = :sh",
             ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":new": {"S": "shared"}},
+            ExpressionAttributeValues={":sh": {"S": "shared"}},
         )
 
-        # 3) Build inline profile + snippet
+        # regenerate share.yaml
+        cmd_id = share_table()
+
+        # build profile + snippet
         profile = {
             "shareCredentialsVersion": 1,
-            "endpoint": DELTA_SERVER_URL,  # ← INLINE PROFILE
+            "endpoint": DELTA_SERVER_URL,
             "bearerToken": "",
         }
-        snippet = {
-            "tableUrl": f"share://my_share.default.{table_id}",
-            "ssmCommandId": cmd_id,
-        }
+        snippet_text = (
+            "!pip install delta-sharing\n"
+            "import json\n\n"
+            "profile = " + json.dumps(profile, indent=2) + "\n\n"
+            "with open('share_creds.json','w') as f:\n"
+            "    json.dump(profile,f)\n\n"
+            "import delta_sharing\n\n"
+            f"df = delta_sharing.load_as_pandas('share_creds.json#my_share.default.{table_id}')\n"
+            "df.head()\n"
+        )
+
+        # save snippet
+        dynamodb.update_item(
+            TableName=DDB_TABLE,
+            Key={"userId": {"S": user_id}, "fileKey": {"S": file_key}},
+            UpdateExpression="SET notebookSnippet = :ns",
+            ExpressionAttributeValues={":ns": {"S": snippet_text}},
+        )
 
         return build_response(
             200,
             {
-                "profile": profile,  # ← RETURN PROFILE INLINE
-                "snippet": snippet,
+                "profile": profile,
+                "snippet": {
+                    "tableUrl": f"share://my_share.default.{table_id}",
+                    "notebookSnippet": snippet_text,
+                },
                 "status": "shared",
             },
         )
 
-    # GET /datasets — list user’s uploads
+    # POST /unshare — revoke sharing of a table
+    if method == "POST" and path == "/unshare":
+        body = json.loads(event.get("body", "{}") or "{}")
+        table_id = body.get("tableId")
+        if not table_id:
+            return build_response(400, {"error": "Missing tableId"})
+
+        # 1) Find the record in DynamoDB
+        resp = dynamodb.scan(
+            TableName=DDB_TABLE,
+            FilterExpression="tableId = :t",
+            ExpressionAttributeValues={":t": {"S": table_id}},
+            ProjectionExpression="userId,fileKey",
+        )
+        items = resp.get("Items", [])
+        if not items:
+            return build_response(404, {"error": "Dataset record not found"})
+        user_id, file_key = items[0]["userId"]["S"], items[0]["fileKey"]["S"]
+
+        # 2) Update status back to 'converted'
+        dynamodb.update_item(
+            TableName=DDB_TABLE,
+            Key={"userId": {"S": user_id}, "fileKey": {"S": file_key}},
+            UpdateExpression="SET #s = :c",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":c": {"S": "converted"}},
+        )
+
+        # 3) Regenerate share.yaml (will drop this table)
+        share_table()
+
+        # 4) Return success
+        return build_response(200, {"status": "converted"})
+
+    # GET /snippet — retrieve the saved notebook snippet for a table
+    if method == "GET" and path == "/snippet":
+        params = event.get("queryStringParameters") or {}
+        table_id = params.get("tableId")
+        if not table_id:
+            return build_response(400, {"error": "Missing tableId"})
+
+        # find the record (we scan because our primary key is userId+fileKey)
+        resp = dynamodb.scan(
+            TableName=DDB_TABLE,
+            FilterExpression="tableId = :t",
+            ExpressionAttributeValues={":t": {"S": table_id}},
+            ProjectionExpression="notebookSnippet",
+        )
+        items = resp.get("Items", [])
+        if not items or "notebookSnippet" not in items[0]:
+            return build_response(404, {"error": "Snippet not found"})
+
+        snippet = items[0]["notebookSnippet"]["S"]
+        return build_response(200, {"notebookSnippet": snippet})
+
+    # GET /datasets
     if method == "GET" and path == "/datasets":
         params = event.get("queryStringParameters") or {}
         user_id = params.get("userId")
@@ -251,8 +310,8 @@ def main(event, context):
             return build_response(400, {"error": "Missing userId"})
         resp = dynamodb.query(
             TableName=DDB_TABLE,
-            KeyConditionExpression="userId = :uid",
-            ExpressionAttributeValues={":uid": {"S": user_id}},
+            KeyConditionExpression="userId = :u",
+            ExpressionAttributeValues={":u": {"S": user_id}},
         )
         items = [
             {
@@ -264,5 +323,4 @@ def main(event, context):
         ]
         return build_response(200, {"datasets": items})
 
-    # Fallback
     return build_response(404, {"error": "Route not found"})
