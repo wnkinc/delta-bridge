@@ -8,14 +8,14 @@ interface ShareResponse {
   };
   snippet: {
     tableUrl: string;
-    ssmCommandId: string;
+    notebookSnippet?: string;
   };
   status: string;
 }
 
 interface ShareActionsProps {
   tableId: string;
-  status: string; // "pending" | "converted" | "shared"
+  status: "pending" | "converted" | "shared";
   onStatusChange: (newStatus: string) => void;
 }
 
@@ -27,20 +27,30 @@ const ShareActions: React.FC<ShareActionsProps> = ({
   const [loading, setLoading] = useState(false);
   const [snippetText, setSnippetText] = useState<string>("");
   const [showModal, setShowModal] = useState(false);
+  const [copied, setCopied] = useState(false); // new
 
-  // helper to build the Python snippet from a fresh share-response
-  const buildSnippet = (profile: ShareResponse["profile"], tableUrl: string) =>
-    `import delta_sharing
+  // helper to build the Python snippet
+  const buildSnippet = (
+    profile: ShareResponse["profile"],
+    tableUrl: string
+  ) => `!pip install delta-sharing
+import json
 
-# inline credentials profile
 profile = ${JSON.stringify(profile, null, 2)}
 
-table_url = "${tableUrl}"
+with open('share_creds.json','w') as f:
+    json.dump(profile,f)
 
-df = delta_sharing.load_as_pandas(table_url, profile=profile)
+import delta_sharing
+
+df = delta_sharing.load_as_pandas('share_creds.json#${tableUrl.replace(
+    "share://",
+    ""
+  )}')
+df.head()
 `;
 
-  // --- share: POST /share
+  // --- share
   const doShare = async () => {
     setLoading(true);
     const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/share`, {
@@ -48,18 +58,21 @@ df = delta_sharing.load_as_pandas(table_url, profile=profile)
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tableId }),
     });
-
     const data: ShareResponse = await res.json();
     setLoading(false);
 
     if (res.ok) {
       onStatusChange("shared");
-      setSnippetText(buildSnippet(data.profile, data.snippet.tableUrl));
+      const text =
+        data.snippet.notebookSnippet ??
+        buildSnippet(data.profile, data.snippet.tableUrl);
+      setSnippetText(text);
       setShowModal(true);
+      setCopied(false);
     }
   };
 
-  // --- unshare: POST /unshare
+  // --- unshare
   const doUnshare = async () => {
     setLoading(true);
     const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/unshare`, {
@@ -68,7 +81,6 @@ df = delta_sharing.load_as_pandas(table_url, profile=profile)
       body: JSON.stringify({ tableId }),
     });
     setLoading(false);
-
     if (res.ok) {
       onStatusChange("converted");
       setSnippetText("");
@@ -76,33 +88,37 @@ df = delta_sharing.load_as_pandas(table_url, profile=profile)
     }
   };
 
-  // --- view saved snippet: GET /snippet?tableId=...
+  // --- view snippet
   const doViewSnippet = async () => {
     setLoading(true);
-
     const url = new URL(`${process.env.NEXT_PUBLIC_API_URL}/snippet`);
     url.searchParams.set("tableId", tableId);
-
     const res = await fetch(url.toString(), {
       method: "GET",
       headers: { "Content-Type": "application/json" },
     });
-
     const payload: { notebookSnippet?: string; error?: string } =
       await res.json();
-
     setLoading(false);
 
     if (res.ok && payload.notebookSnippet) {
       setSnippetText(payload.notebookSnippet);
       setShowModal(true);
+      setCopied(false);
     } else {
-      // optionally surface the error:
       console.error("Failed to load snippet:", payload.error);
       alert(
         payload.error || "Could not fetch snippet. Check console for details."
       );
     }
+  };
+
+  // --- copy handler
+  const handleCopy = () => {
+    navigator.clipboard.writeText(snippetText);
+    setCopied(true);
+    // clear after 2 seconds
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
@@ -146,13 +162,19 @@ df = delta_sharing.load_as_pandas(table_url, profile=profile)
               className="w-full h-40 p-2 bg-gray-900 text-green-200 rounded"
               value={snippetText}
             />
-            <div className="mt-4 flex justify-end space-x-2">
+
+            <div className="mt-4 flex items-center space-x-2 justify-end">
               <button
-                onClick={() => navigator.clipboard.writeText(snippetText)}
+                onClick={handleCopy}
                 className="px-4 py-2 bg-blue-600 rounded hover:bg-blue-700"
               >
                 Copy to clipboard
               </button>
+              {/* copied indicator */}
+              {copied && (
+                <span className="text-sm text-green-400">Copied!</span>
+              )}
+
               <button
                 onClick={() => setShowModal(false)}
                 className="px-4 py-2 bg-gray-600 rounded hover:bg-gray-500"

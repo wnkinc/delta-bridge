@@ -3,16 +3,19 @@ import pulumi_aws as aws
 
 
 def create_storage():
-    # 1) S3 bucket that stores raw uploads + Delta tables
+    # 1) S3 bucket that stores raw uploads + Delta tables, with CORS for your frontends
     bucket = aws.s3.Bucket(
         "datasets",
         cors_rules=[
             aws.s3.BucketCorsRuleArgs(
                 allowed_methods=["PUT", "POST", "GET", "HEAD"],
-                allowed_origins=["http://localhost:3000"],  # or ["*"] for all origins
+                allowed_origins=[
+                    "http://localhost:3000",  # local dev
+                    "https://delta-bridge.bywk.dev",  # production
+                ],
                 allowed_headers=["*"],
                 expose_headers=["ETag"],
-                max_age_seconds=3000,
+                max_age_seconds=3600,
             )
         ],
     )
@@ -21,7 +24,7 @@ def create_storage():
     ddb_table = aws.dynamodb.Table(
         "dataset-tracking",
         attributes=[
-            {"name": "userId",  "type": "S"},
+            {"name": "userId", "type": "S"},
             {"name": "fileKey", "type": "S"},
         ],
         hash_key="userId",
@@ -47,7 +50,6 @@ def configure_bucket_notification(
             aws.s3.BucketNotificationLambdaFunctionArgs(
                 lambda_function_arn=lambda_func.arn,
                 events=["s3:ObjectCreated:Put"],
-                # Only trigger on keys under 'datasets/.../raw/' ending in '.csv'
                 filter_prefix="datasets/",
                 filter_suffix=".csv",
             )

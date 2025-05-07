@@ -37,7 +37,7 @@ export default function LoginPage() {
       </h1>
       <input
         type="email"
-        placeholder="Email"
+        placeholder="Email - fake is fine ;)"
         className="mb-2 p-2 rounded w-72 bg-white text-black"
         value={email}
         onChange={(e) => setEmail(e.target.value)}

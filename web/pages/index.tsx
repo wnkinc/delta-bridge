@@ -1,3 +1,5 @@
+// pages/index.tsx
+
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { onAuthStateChanged } from "firebase/auth";
@@ -18,10 +20,19 @@ export default function HomePage() {
       <h1 className="text-4xl font-extrabold mb-4 text-center">
         Welcome to DeltaBridge
       </h1>
-      <p className="text-gray-300 text-lg max-w-xl text-center mb-8">
+      <p className="text-gray-300 text-lg max-w-xl text-center mb-4">
         Upload your data. Share it securely. Let anyone query it with a simple
         link and a notebook.
       </p>
+      {/* GitHub Repo Link */}
+      <a
+        href="https://github.com/wnkinc/delta-bridge"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mb-8 text-blue-400 hover:text-blue-200 transition"
+      >
+        View source on GitHub
+      </a>
 
       {userEmail ? (
         <Link href="/dashboard">

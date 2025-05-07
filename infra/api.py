@@ -4,18 +4,22 @@ import pulumi_aws.apigatewayv2 as apigw
 
 
 def create_api(lambda_func: aws.lambda_.Function) -> apigw.Api:
+    # 1) Define the HTTP API with CORS enabled for localhost and your Cloudflare domain
     api = apigw.Api(
         "ingest-api",
         protocol_type="HTTP",
         cors_configuration=apigw.ApiCorsConfigurationArgs(
-            allow_origins=["http://localhost:3000"],
+            allow_origins=[
+                "http://localhost:3000",  # local dev
+                "https://delta-bridge.bywk.dev",  # production
+            ],
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
             allow_credentials=True,
         ),
     )
 
-    # Lambda integration for all routes
+    # 2) Wire up a Lambda proxy integration
     integration = apigw.Integration(
         "lambda-integration",
         api_id=api.id,
@@ -25,7 +29,7 @@ def create_api(lambda_func: aws.lambda_.Function) -> apigw.Api:
         payload_format_version="2.0",
     )
 
-    # Routes (including new POST /share)
+    # 3) Create one route per endpoint
     for method, route in [
         ("POST", "/presign"),
         ("POST", "/process"),
@@ -41,7 +45,7 @@ def create_api(lambda_func: aws.lambda_.Function) -> apigw.Api:
             target=integration.id.apply(lambda iid: f"integrations/{iid}"),
         )
 
-    # Stage
+    # 4) Deploy the default stage with auto-deploy on each change
     apigw.Stage(
         "api-stage",
         api_id=api.id,
@@ -49,7 +53,7 @@ def create_api(lambda_func: aws.lambda_.Function) -> apigw.Api:
         auto_deploy=True,
     )
 
-    # Permission so API GW can invoke the Lambda
+    # 5) Give API Gateway permission to invoke your Lambda
     aws.lambda_.Permission(
         "api-lambda-permission",
         action="lambda:InvokeFunction",
@@ -58,7 +62,7 @@ def create_api(lambda_func: aws.lambda_.Function) -> apigw.Api:
         source_arn=api.execution_arn.apply(lambda arn: f"{arn}/*/*"),
     )
 
-    # Export endpoint
+    # 6) Export the URL so you can reference it elsewhere
     pulumi.export("api_url", api.api_endpoint)
 
     return api

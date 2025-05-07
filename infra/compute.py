@@ -30,8 +30,8 @@ def create_lambda(lambda_role, bucket, ddb_table, delta_instance_id, delta_serve
         image_uri=image.image_uri,
         role=lambda_role.arn,
         architectures=["arm64"],
-        timeout=60,
-        memory_size=512,
+        timeout=300,
+        memory_size=1024,
         environment=aws.lambda_.FunctionEnvironmentArgs(
             variables={
                 "BUCKET_NAME": bucket.bucket,
